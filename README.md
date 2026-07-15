@@ -59,9 +59,14 @@ Only rebuild the exes when you're happy with the behavior.
 ## Rebuilding the exes
 
 ```powershell
-.\.venv\Scripts\pyinstaller.exe --onefile --windowed --name CSVtoMF4 app.py
-.\.venv\Scripts\pyinstaller.exe --onefile --windowed --name MF4Viewer viewer.py
+.\.venv\Scripts\pyinstaller.exe --onefile --windowed --name CSVtoMF4 --icon assets\csvtomf4.ico --add-data "assets\csvtomf4.ico;." app.py
+.\.venv\Scripts\pyinstaller.exe --onefile --windowed --name MF4Viewer --icon assets\mf4viewer.ico --add-data "assets\mf4viewer.ico;." viewer.py
 ```
+
+`--icon` stamps the icon into the exe (what Explorer and pinned taskbar
+buttons show); `--add-data` bundles the same .ico inside so the app can set
+it on its window at runtime (what the taskbar shows while running). Close
+any running copy of the app before rebuilding - Windows locks the exe.
 
 - `--onefile` — pack everything into a single self-extracting exe. Big
   (numpy/pandas are heavy) and a few seconds slow to launch, but trivially
