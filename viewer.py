@@ -19,6 +19,12 @@ How the pieces fit:
     checkbox column, so each row's label starts with a checkbox character
     (U+2610 empty / U+2611 checked) that a click handler toggles - the
     standard tkinter idiom for check-lists.
+  - Measurement cursors (like MATLAB data tips / CANalyzer cursors) are
+    vertical axvline()s drawn on every subplot. matplotlib mouse events
+    (button_press / motion_notify / button_release) implement dragging:
+    press within a few pixels of a cursor grabs it, motion moves it, and a
+    readout table on the right interpolates every plotted signal at the
+    cursor times (np.interp) and shows C1, C2 and the C2-C1 delta.
   - Reading a channel is fast, so unlike the converter there is no worker
     thread here - everything runs on the GUI thread.
 
@@ -30,6 +36,8 @@ import os
 import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
+import numpy as np
 
 import matplotlib
 matplotlib.use("TkAgg")   # select the tkinter drawing backend before pyplot-ish imports
@@ -46,13 +54,16 @@ CHECKED = "☑"     # ticked checkbox glyph
 ACCENT = "#0b5ed7"     # button/plot accent blue
 ACCENT_DARK = "#0a53be"
 
+CURSOR_COLORS = ("#d62728", "#2ca02c")   # C1 red, C2 green
+GRAB_PIXELS = 8   # how close (in pixels) a click must be to grab a cursor
+
 
 class ViewerApp:
     def __init__(self, root):
         self.root = root
         root.title("MF4 Viewer")
-        root.geometry("1150x680")
-        root.minsize(820, 500)
+        root.geometry("1280x680")
+        root.minsize(900, 500)
 
         # ttk theming: 'vista' is the native-looking theme on Windows.
         style = ttk.Style()
@@ -62,8 +73,17 @@ class ViewerApp:
         style.configure("Treeview.Heading", padding=4)
 
         self.mdf = None
-        self.entries = {}   # treeview item id -> (channel name, group, index)
+        self.entries = {}      # treeview item id -> (channel name, group, index)
         self.checked = set()   # item ids whose checkbox is ticked
+
+        # plot/cursor state
+        self.axes = []                    # axes of the current plot
+        self.plotted = []                 # Signals currently drawn
+        self.data_xrange = (0.0, 1.0)     # min/max time of the current plot
+        self.cursor_mode = 0              # 0 = off, 1, 2
+        self.cursors = []                 # [{'x': float, 'lines': [Line2D,...]}]
+        self.last_cursor_x = [None, None]  # remembered across re-plots
+        self.dragging = None              # index of cursor being dragged
 
         # --- top toolbar: everything the user acts on, in one row --------------
         top = tk.Frame(root)
@@ -83,8 +103,16 @@ class ViewerApp:
         ttk.Checkbutton(top, text="Stacked axes",
                         variable=self.stacked_var).pack(side="left", padx=10)
 
+        tk.Label(top, text="Cursors:").pack(side="left", padx=(6, 2))
+        self.cursor_combo = ttk.Combobox(
+            top, values=("Off", "1 cursor", "2 cursors"),
+            state="readonly", width=9)
+        self.cursor_combo.set("Off")
+        self.cursor_combo.pack(side="left")
+        self.cursor_combo.bind("<<ComboboxSelected>>", self.set_cursor_mode)
+
         tk.Button(top, text="Check all",
-                  command=lambda: self.set_all(True)).pack(side="left", padx=(6, 0))
+                  command=lambda: self.set_all(True)).pack(side="left", padx=(10, 0))
         tk.Button(top, text="Uncheck all",
                   command=lambda: self.set_all(False)).pack(side="left", padx=(4, 0))
 
@@ -109,9 +137,9 @@ class ViewerApp:
         self.tree.heading("#0", text="Channel")
         self.tree.heading("unit", text="Unit")
         self.tree.heading("samples", text="Samples")
-        self.tree.column("#0", width=200, stretch=True)
-        self.tree.column("unit", width=60, anchor="center", stretch=False)
-        self.tree.column("samples", width=70, anchor="e", stretch=False)
+        self.tree.column("#0", width=160, stretch=True)
+        self.tree.column("unit", width=55, anchor="center", stretch=False)
+        self.tree.column("samples", width=62, anchor="e", stretch=False)
 
         tree_scroll = ttk.Scrollbar(left, orient="vertical",
                                     command=self.tree.yview)
@@ -122,15 +150,37 @@ class ViewerApp:
         # one click anywhere on a row toggles its checkbox
         self.tree.bind("<Button-1>", self.on_tree_click)
 
-        # right pane: matplotlib figure + its navigation toolbar
+        # right pane: plot on the left, cursor readout panel on the right
         right = tk.Frame(paned)
         paned.add(right, weight=3)
 
+        # cursor readout - hidden until cursors are switched on
+        self.readout_frame = ttk.LabelFrame(right, text="Cursor values")
+        self.readout = ttk.Treeview(
+            self.readout_frame, columns=("c1", "c2", "delta"),
+            show="tree headings", selectmode="none", height=8)
+        self.readout.heading("#0", text="Signal")
+        self.readout.heading("c1", text="C1")
+        self.readout.heading("c2", text="C2")
+        self.readout.heading("delta", text="Δ (C2−C1)")
+        self.readout.column("#0", width=150, stretch=True)
+        for col in ("c1", "c2", "delta"):
+            self.readout.column(col, width=85, anchor="e", stretch=False)
+        self.readout.pack(fill="both", expand=True, padx=4, pady=4)
+
+        self.plot_frame = tk.Frame(right)
+        self.plot_frame.pack(side="left", fill="both", expand=True)
+
         self.fig = Figure(dpi=100, facecolor="white")
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        toolbar = NavigationToolbar2Tk(self.canvas, right)  # zoom/pan/save live here
-        toolbar.update()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plot_frame)
+        self.mpl_toolbar = NavigationToolbar2Tk(self.canvas, self.plot_frame)
+        self.mpl_toolbar.update()
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        # mouse events for cursor dragging
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
 
         self.show_placeholder("Open an MF4 file, tick some channels,\n"
                               "then press 'Plot checked'")
@@ -222,6 +272,10 @@ class ViewerApp:
     # --- plotting ---------------------------------------------------------------
 
     def show_placeholder(self, message):
+        self.axes = []
+        self.plotted = []
+        self.cursors = []
+        self.readout_frame.pack_forget()
         self.fig.clf()
         ax = self.fig.add_subplot(111)
         ax.text(0.5, 0.5, message, ha="center", va="center",
@@ -265,6 +319,7 @@ class ViewerApp:
             return
 
         self.fig.clf()
+        self.cursors = []
         if self.stacked_var.get():
             # one subplot per channel, sharing the x axis: zooming time in
             # one plot zooms all of them - ideal for comparing mixed units.
@@ -278,6 +333,7 @@ class ViewerApp:
                 ax.set_ylabel(label, fontsize=8)
                 self.tidy_axes(ax)
             axes[-1].set_xlabel("time [s]")
+            self.axes = list(axes)
         else:
             # everything on one axis with a legend - good for same-unit signals
             ax = self.fig.add_subplot(111)
@@ -287,9 +343,115 @@ class ViewerApp:
             ax.legend(fontsize=8)
             self.tidy_axes(ax)
             ax.set_xlabel("time [s]")
+            self.axes = [ax]
+
+        self.plotted = signals
+        self.data_xrange = (float(min(s.timestamps[0] for s in signals)),
+                            float(max(s.timestamps[-1] for s in signals)))
 
         self.fig.tight_layout()
-        self.canvas.draw()
+        self.rebuild_cursors()   # re-add cursors on the fresh axes (draws too)
+
+    # --- measurement cursors ------------------------------------------------------
+
+    def set_cursor_mode(self, event=None):
+        self.cursor_mode = {"Off": 0, "1 cursor": 1,
+                            "2 cursors": 2}[self.cursor_combo.get()]
+        self.rebuild_cursors()
+
+    def rebuild_cursors(self):
+        """(Re)create cursor lines on the current axes to match cursor_mode."""
+        for cur in self.cursors:
+            for line in cur["lines"]:
+                try:
+                    line.remove()
+                except Exception:
+                    pass
+        self.cursors = []
+
+        if not self.axes or self.cursor_mode == 0:
+            self.readout_frame.pack_forget()
+            self.canvas.draw_idle()
+            return
+
+        xmin, xmax = self.data_xrange
+        defaults = (xmin + 0.25 * (xmax - xmin), xmin + 0.75 * (xmax - xmin))
+        for i in range(self.cursor_mode):
+            x = self.last_cursor_x[i]
+            if x is None or not (xmin <= x <= xmax):
+                x = defaults[i]
+            self.last_cursor_x[i] = x
+            lines = [ax.axvline(x, color=CURSOR_COLORS[i], linestyle="--",
+                                linewidth=1.1) for ax in self.axes]
+            self.cursors.append({"x": x, "lines": lines})
+
+        # with one cursor, hide the C2 and delta columns
+        self.readout.configure(
+            displaycolumns=("c1",) if self.cursor_mode == 1
+            else ("c1", "c2", "delta"))
+        self.readout_frame.pack(side="right", fill="y", padx=(6, 0),
+                                before=self.plot_frame)
+        self.update_readout()
+        self.canvas.draw_idle()
+
+    def update_readout(self):
+        """Interpolate every plotted signal at the cursor times."""
+        self.readout.delete(*self.readout.get_children())
+        if not self.cursors:
+            return
+        xs = [cur["x"] for cur in self.cursors]
+
+        def fmt(value):
+            return "{:.6g}".format(value)
+
+        # first row: the cursor positions themselves (and Δt)
+        row = [fmt(xs[0]),
+               fmt(xs[1]) if len(xs) > 1 else "",
+               fmt(xs[1] - xs[0]) if len(xs) > 1 else ""]
+        self.readout.insert("", "end", text="time [s]", values=row)
+
+        for sig in self.plotted:
+            t = np.asarray(sig.timestamps, dtype=np.float64)
+            y = np.asarray(sig.samples, dtype=np.float64)
+            vals = [float(np.interp(x, t, y)) for x in xs]
+            row = [fmt(vals[0]),
+                   fmt(vals[1]) if len(vals) > 1 else "",
+                   fmt(vals[1] - vals[0]) if len(vals) > 1 else ""]
+            name = sig.name if not sig.unit else "{} [{}]".format(sig.name, sig.unit)
+            self.readout.insert("", "end", text=name, values=row)
+
+    # mouse handling: press near a cursor grabs it, motion drags, release drops.
+    # While a toolbar tool (zoom/pan) is active, toolbar.mode is non-empty and
+    # we stand down so the two features don't fight over the mouse.
+
+    def on_press(self, event):
+        if (not self.cursors or event.inaxes is None
+                or self.mpl_toolbar.mode):
+            return
+        for i, cur in enumerate(self.cursors):
+            pixel_x = event.inaxes.transData.transform((cur["x"], 0))[0]
+            if abs(event.x - pixel_x) <= GRAB_PIXELS:
+                self.dragging = i
+                return
+
+    def on_motion(self, event):
+        if self.dragging is None or event.xdata is None:
+            return
+        self.move_cursor(self.dragging, event.xdata)
+
+    def on_release(self, event):
+        self.dragging = None
+
+    def move_cursor(self, index, x):
+        xmin, xmax = self.data_xrange
+        x = min(max(float(x), xmin), xmax)
+        cur = self.cursors[index]
+        cur["x"] = x
+        self.last_cursor_x[index] = x
+        for line in cur["lines"]:
+            line.set_xdata([x, x])
+        self.update_readout()
+        self.canvas.draw_idle()
 
 
 def main():

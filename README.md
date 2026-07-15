@@ -35,6 +35,13 @@ The toolbar under the plot has zoom-rectangle, pan, back/forward, reset,
 and save-as-PNG. If the viewer can open the file at all, its MDF structure
 is valid.
 
+*Measurement cursors* (like MATLAB/CANalyzer): pick **1 cursor** or
+**2 cursors** in the toolbar dropdown, then drag the dashed vertical lines
+on the plot. The *Cursor values* panel shows every plotted signal
+interpolated at C1 and C2, plus the C2−C1 delta and Δt. Cursor dragging
+pauses while a zoom/pan tool is active so the two don't fight over the
+mouse.
+
 ## Developing: run without building
 
 Building the exe takes minutes; running the script takes seconds. While
