@@ -1,4 +1,5 @@
 numpy
 pandas
 asammdf
+matplotlib
 pyinstaller
