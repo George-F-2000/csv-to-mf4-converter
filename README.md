@@ -27,10 +27,17 @@ folder), press Convert. Each `.mf4` is written next to its source CSV. You
 can also drag CSV files onto the exe icon — they arrive pre-loaded in the
 list.
 
-**Viewer:** double-click `dist\MF4Viewer.exe` (or drag an `.mf4` onto it),
-tick the signals you want in the list, and press *Plot Selected Signals*.
-*Stacked axes* gives each channel its own subplot sharing the time axis
-(best for mixed units); unchecked, they overlay on one axis with a legend.
+**Viewer:** double-click `dist\MF4Viewer.exe` (or drag `.mf4` files onto
+it), tick the signals you want in the list, and press *Plot Selected
+Signals*. *Stacked axes* gives each signal its own subplot sharing the time
+axis (best for mixed units); unchecked, everything overlays on one axis
+with a legend.
+
+*Comparing runs:* Open MF4 adds files instead of replacing - each file
+becomes a node in the signal tree. In stacked mode, signals are grouped by
+name, so the same signal from every file lands on the same subplot with one
+color per file (legend in the top subplot). Cursor readout rows are
+prefixed with the file name. *Close all files* resets.
 The toolbar under the plot has zoom-rectangle, pan, back/forward, reset,
 and save-as-PNG. If the viewer can open the file at all, its MDF structure
 is valid.

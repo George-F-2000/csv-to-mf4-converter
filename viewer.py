@@ -3,32 +3,28 @@ viewer.py
 ================================================================================
 Slim MF4 viewer - sanity-check MDF files without AVL Drive.
 
-Opens an .mf4/.mdf file with asammdf (the same library the converter uses to
-write them), lists every channel with its unit and sample count, and plots
-checked channels against time. If this app can open the file and the traces
-look right, the file structure is valid MDF.
+Opens one or MORE .mf4/.mdf files with asammdf (the same library the
+converter uses to write them), lists every channel with its unit and sample
+count, and plots checked signals against time. Opening several files lets
+runs be overlaid and compared - e.g. a baseline maneuver vs. a tuning change.
 
 How the pieces fit:
-  - asammdf reads the file. `mdf.channels_db` maps each channel name to its
+  - asammdf reads each file. `mdf.channels_db` maps each channel name to its
     (group, index) location inside the file; `mdf.get()` pulls one channel's
-    samples + timestamps + unit on demand, so we never load the whole file.
-  - matplotlib draws the plots. Its Figure is embedded straight into the
-    tkinter window via FigureCanvasTkAgg, and NavigationToolbar2Tk gives
-    zoom-to-rectangle, pan, back/forward, home, and save-as-PNG for free.
-  - Channel selection uses checkboxes. tkinter's Treeview has no native
-    checkbox column, so each row's label starts with a checkbox character
-    (U+2610 empty / U+2611 checked) that a click handler toggles - the
-    standard tkinter idiom for check-lists.
-  - Measurement cursors (like MATLAB data tips / CANalyzer cursors) are
-    vertical axvline()s drawn on every subplot. matplotlib mouse events
-    (button_press / motion_notify / button_release) implement dragging:
-    press within a few pixels of a cursor grabs it, motion moves it, and a
-    readout table on the right interpolates every plotted signal at the
-    cursor times (np.interp) and shows C1, C2 and the C2-C1 delta.
-  - Reading a channel is fast, so unlike the converter there is no worker
-    thread here - everything runs on the GUI thread.
+    samples + timestamps + unit on demand, so files are never fully loaded.
+  - The signal list is a two-level tree: file nodes at the top, that file's
+    signals underneath. tkinter's Treeview has no native checkbox column, so
+    each signal row's label starts with a checkbox character (U+2610 empty /
+    U+2611 checked) that a click handler toggles.
+  - matplotlib draws the plots. In stacked mode, checked signals are grouped
+    BY NAME - the same signal from every file shares one subplot, one color
+    per file - which is what makes run-to-run comparison readable.
+  - Measurement cursors (MATLAB / CANalyzer style) are vertical axvline()s
+    dragged via matplotlib mouse events; the readout table interpolates
+    every plotted trace at the cursor times (np.interp) and shows C1, C2
+    and the C2-C1 delta, one row per file+signal.
 
-Run from source:   .venv\\Scripts\\python.exe viewer.py [file.mf4]
+Run from source:   .venv\\Scripts\\python.exe viewer.py [file.mf4 ...]
 ================================================================================
 """
 
@@ -44,6 +40,7 @@ matplotlib.use("TkAgg")   # select the tkinter drawing backend before pyplot-ish
 from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                NavigationToolbar2Tk)
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.transforms import blended_transform_factory
 
 from asammdf import MDF
@@ -74,6 +71,12 @@ def set_window_icon(root, icon_name):
         pass
 
 
+def file_color(file_index):
+    """One consistent color per file, so run A is always the same color
+    in every subplot."""
+    return "C{}".format(file_index % 10)
+
+
 class ViewerApp:
     def __init__(self, root):
         self.root = root
@@ -89,16 +92,16 @@ class ViewerApp:
         style.configure("Treeview", rowheight=24)
         style.configure("Treeview.Heading", padding=4)
 
-        self.mdf = None
-        self.entries = {}      # treeview item id -> (channel name, group, index)
-        self.checked = set()   # item ids whose checkbox is ticked
+        self.files = []        # [{"path", "label", "mdf"}]
+        self.entries = {}      # signal item id -> (file idx, name, group, index)
+        self.checked = set()   # signal item ids whose checkbox is ticked
 
         # plot/cursor state
         self.axes = []                    # axes of the current plot
-        self.plotted = []                 # Signals currently drawn
+        self.plotted = []                 # [(row label, Signal)] currently drawn
         self.data_xrange = (0.0, 1.0)     # min/max time of the current plot
         self.cursor_mode = 0              # 0 = off, 1, 2
-        self.cursors = []                 # [{'x': float, 'lines': [Line2D,...]}]
+        self.cursors = []                 # [{'x', 'lines', 'label'}]
         self.last_cursor_x = [None, None]  # remembered across re-plots
         self.dragging = None              # index of cursor being dragged
 
@@ -132,6 +135,8 @@ class ViewerApp:
                   command=lambda: self.set_all(True)).pack(side="left", padx=(10, 0))
         tk.Button(top, text="Uncheck all",
                   command=lambda: self.set_all(False)).pack(side="left", padx=(4, 0))
+        tk.Button(top, text="Close all files",
+                  command=self.close_all).pack(side="left", padx=(4, 0))
 
         self.info_var = tk.StringVar(value="No file loaded.")
         tk.Label(top, textvariable=self.info_var, anchor="e",
@@ -139,11 +144,11 @@ class ViewerApp:
 
         ttk.Separator(root, orient="horizontal").pack(fill="x", padx=10)
 
-        # --- resizable split: channel list | plot area -------------------------
+        # --- resizable split: signal tree | plot area ---------------------------
         paned = ttk.PanedWindow(root, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10, pady=(6, 10))
 
-        # left pane: channel check-list
+        # left pane: two-level tree - file nodes with signal check-rows under them
         left = tk.Frame(paned)
         paned.add(left, weight=1)
 
@@ -154,9 +159,10 @@ class ViewerApp:
         self.tree.heading("#0", text="Signals")
         self.tree.heading("unit", text="Unit")
         self.tree.heading("samples", text="Samples")
-        self.tree.column("#0", width=160, stretch=True)
+        self.tree.column("#0", width=185, stretch=True)
         self.tree.column("unit", width=55, anchor="center", stretch=False)
         self.tree.column("samples", width=62, anchor="e", stretch=False)
+        self.tree.tag_configure("file", font=("Segoe UI", 9, "bold"))
 
         tree_scroll = ttk.Scrollbar(left, orient="vertical",
                                     command=self.tree.yview)
@@ -164,7 +170,7 @@ class ViewerApp:
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="left", fill="y")
 
-        # one click anywhere on a row toggles its checkbox
+        # one click on a signal row toggles its checkbox
         self.tree.bind("<Button-1>", self.on_tree_click)
 
         # right pane: plot on the left, cursor readout panel on the right
@@ -180,7 +186,7 @@ class ViewerApp:
         self.readout.heading("c1", text="C1 (red)")
         self.readout.heading("c2", text="C2 (green)")
         self.readout.heading("delta", text="Δ (C2−C1)")
-        self.readout.column("#0", width=150, stretch=True)
+        self.readout.column("#0", width=190, stretch=True)
         for col in ("c1", "c2", "delta"):
             self.readout.column(col, width=85, anchor="e", stretch=False)
         self.readout.pack(fill="both", expand=True, padx=4, pady=4)
@@ -199,22 +205,23 @@ class ViewerApp:
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
 
-        self.show_placeholder("Open an MF4 file, tick some signals,\n"
+        self.show_placeholder("Open one or more MF4 files, tick some signals,\n"
                               "then press 'Plot Selected Signals'")
 
-        # a file dragged onto the exe arrives as a command-line argument
-        if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-            self.load(sys.argv[1])
+        # files dragged onto the exe arrive as command-line arguments
+        for arg in sys.argv[1:]:
+            if os.path.isfile(arg):
+                self.add_file(arg)
 
     # --- checkbox handling ------------------------------------------------------
 
     def on_tree_click(self, event):
         item = self.tree.identify_row(event.y)
-        if item:
+        if item in self.entries:   # signal rows only; file rows just expand
             self.set_checked(item, item not in self.checked)
 
     def set_checked(self, item, state):
-        name = self.entries[item][0]
+        name = self.entries[item][1]
         if state:
             self.checked.add(item)
             self.tree.item(item, text="{} {}".format(CHECKED, name))
@@ -229,13 +236,19 @@ class ViewerApp:
     # --- file loading ----------------------------------------------------------
 
     def open_file(self):
-        path = filedialog.askopenfilename(
-            title="Open MDF file",
+        paths = filedialog.askopenfilenames(
+            title="Open MDF file(s)",
             filetypes=[("MDF files", "*.mf4 *.mdf *.dat"), ("All files", "*.*")])
-        if path:
-            self.load(path)
+        for path in paths:
+            self.add_file(path)
 
-    def load(self, path):
+    def add_file(self, path):
+        """Open one more MF4 and append it to the tree (does not replace)."""
+        path = os.path.abspath(path)
+        if any(f["path"] == path for f in self.files):
+            messagebox.showinfo("Already open",
+                                os.path.basename(path) + " is already open.")
+            return
         try:
             mdf = MDF(path)
         except Exception as exc:
@@ -245,18 +258,17 @@ class ViewerApp:
                 "MDF file.\n\n{}: {}".format(type(exc).__name__, exc))
             return
 
-        if self.mdf is not None:
-            self.mdf.close()
-        self.mdf = mdf
+        label = os.path.basename(path)
+        if any(f["label"] == label for f in self.files):
+            label = "{} ({})".format(label, len(self.files) + 1)
+        file_idx = len(self.files)
+        self.files.append({"path": path, "label": label, "mdf": mdf})
 
-        self.tree.delete(*self.tree.get_children())
-        self.entries = {}
-        self.checked = set()
-
-        # channels_db: {name: [(group, index), ...]} - a name can appear in
-        # several groups, so keep (group, index) with every tree row.
+        # file node, then that file's signals underneath
+        file_item = self.tree.insert("", "end", text=label, open=True,
+                                     values=("", ""), tags=("file",))
         masters = getattr(mdf, "masters_db", {})   # {group: master channel index}
-        n_channels = 0
+        n_signals = 0
         for name in sorted(mdf.channels_db, key=str.lower):
             for group, index in mdf.channels_db[name]:
                 if masters.get(group) == index:
@@ -268,24 +280,40 @@ class ViewerApp:
                 except Exception:
                     pass
                 item = self.tree.insert(
-                    "", "end", text="{} {}".format(UNCHECKED, name),
+                    file_item, "end", text="{} {}".format(UNCHECKED, name),
                     values=(unit, samples))
-                self.entries[item] = (name, group, index)
-                n_channels += 1
+                self.entries[item] = (file_idx, name, group, index)
+                n_signals += 1
 
-        # file summary: duration from the first group's time channel
-        duration = ""
-        try:
-            t = mdf.get_master(0)
-            if len(t) > 1:
-                duration = ", {:.4g} s".format(float(t[-1] - t[0]))
-        except Exception:
-            pass
-        self.info_var.set("{}  —  MDF v{}, {} channels{}".format(
-            os.path.basename(path), mdf.version, n_channels, duration))
-        self.root.title("MF4 Viewer - " + os.path.basename(path))
-        self.show_placeholder("Tick some signals, then press "
-                              "'Plot Selected Signals'")
+        self.update_info()
+        self.root.title("MF4 Viewer - " + ", ".join(f["label"] for f in self.files))
+
+    def close_all(self):
+        for f in self.files:
+            try:
+                f["mdf"].close()
+            except Exception:
+                pass
+        self.files = []
+        self.entries = {}
+        self.checked = set()
+        self.tree.delete(*self.tree.get_children())
+        self.update_info()
+        self.root.title("MF4 Viewer")
+        self.show_placeholder("Open one or more MF4 files, tick some signals,\n"
+                              "then press 'Plot Selected Signals'")
+
+    def update_info(self):
+        if not self.files:
+            self.info_var.set("No file loaded.")
+        elif len(self.files) == 1:
+            f = self.files[0]
+            self.info_var.set("{}  —  MDF v{}, {} signals".format(
+                f["label"], f["mdf"].version,
+                sum(1 for e in self.entries.values() if e[0] == 0)))
+        else:
+            self.info_var.set("{} files, {} signals  —  colors: one per file".format(
+                len(self.files), len(self.entries)))
 
     # --- plotting ---------------------------------------------------------------
 
@@ -308,64 +336,98 @@ class ViewerApp:
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
 
+    def gather_checked(self):
+        """Checked signals in tree order -> [(file_idx, Signal)]. Reads the
+        data via mdf.get(); pops an error dialog and returns None on failure."""
+        picked = []
+        for file_item in self.tree.get_children():
+            for item in self.tree.get_children(file_item):
+                if item not in self.checked:
+                    continue
+                file_idx, name, group, index = self.entries[item]
+                try:
+                    sig = self.files[file_idx]["mdf"].get(
+                        name, group=group, index=index)
+                except Exception as exc:
+                    messagebox.showerror(
+                        "Read error", "Could not read '{}' from {}:\n{}".format(
+                            name, self.files[file_idx]["label"], exc))
+                    return None
+                if sig.samples.dtype.kind not in "iufb":
+                    messagebox.showwarning(
+                        "Not plottable",
+                        "'{}' holds non-numeric data and was skipped.".format(name))
+                    continue
+                picked.append((file_idx, sig))
+        return picked
+
     def plot_selected(self):
-        if self.mdf is None:
+        if not self.files:
             messagebox.showinfo("No file", "Open an MF4 file first.")
             return
-        selected = [self.entries[i] for i in self.tree.get_children()
-                    if i in self.checked]
-        if not selected:
+        picked = self.gather_checked()
+        if picked is None:
+            return
+        if not picked:
             messagebox.showinfo("No signals",
                                 "Tick one or more signals in the list first.")
             return
 
-        signals = []
-        for name, group, index in selected:
-            try:
-                sig = self.mdf.get(name, group=group, index=index)
-            except Exception as exc:
-                messagebox.showerror("Read error",
-                                     "Could not read '{}':\n{}".format(name, exc))
-                return
-            if sig.samples.dtype.kind not in "iufb":   # int/uint/float/bool only
-                messagebox.showwarning(
-                    "Not plottable",
-                    "'{}' holds non-numeric data and was skipped.".format(name))
-                continue
-            signals.append(sig)
-        if not signals:
-            return
+        multi_file = len(self.files) > 1
+        self.plotted = []
+        for file_idx, sig in picked:
+            prefix = self.files[file_idx]["label"] + ": " if multi_file else ""
+            row = prefix + (sig.name if not sig.unit
+                            else "{} [{}]".format(sig.name, sig.unit))
+            self.plotted.append((row, sig))
 
         self.fig.clf()
         self.cursors = []
         if self.stacked_var.get():
-            # one subplot per channel, sharing the x axis: zooming time in
-            # one plot zooms all of them - ideal for comparing mixed units.
-            axes = self.fig.subplots(len(signals), 1, sharex=True)
-            if len(signals) == 1:
+            # group by signal NAME: the same signal from every file shares a
+            # subplot (one color per file) - the run-comparison view. With a
+            # single file this degrades to one subplot per signal, as before.
+            names = list(dict.fromkeys(sig.name for _f, sig in picked))
+            axes = self.fig.subplots(len(names), 1, sharex=True)
+            if len(names) == 1:
                 axes = [axes]
-            for i, (ax, sig) in enumerate(zip(axes, signals)):
-                ax.plot(sig.timestamps, sig.samples, linewidth=0.9,
-                        color="C{}".format(i % 10))
-                label = sig.name if not sig.unit else "{}\n[{}]".format(sig.name, sig.unit)
-                ax.set_ylabel(label, fontsize=8)
+            for pos, name in enumerate(names):
+                ax = axes[pos]
+                unit = ""
+                for file_idx, sig in picked:
+                    if sig.name != name:
+                        continue
+                    unit = unit or sig.unit
+                    color = (file_color(file_idx) if multi_file
+                             else "C{}".format(pos % 10))
+                    ax.plot(sig.timestamps, sig.samples,
+                            linewidth=0.9, color=color)
+                ax.set_ylabel(name if not unit else "{}\n[{}]".format(name, unit),
+                              fontsize=8)
                 self.tidy_axes(ax)
             axes[-1].set_xlabel("time [s]")
+            if multi_file:
+                # one legend, top subplot: which color is which file
+                used = list(dict.fromkeys(f for f, _s in picked))
+                axes[0].legend(
+                    [Line2D([0], [0], color=file_color(f), linewidth=2)
+                     for f in used],
+                    [self.files[f]["label"] for f in used],
+                    fontsize=7, loc="best")
             self.axes = list(axes)
         else:
             # everything on one axis with a legend - good for same-unit signals
             ax = self.fig.add_subplot(111)
-            for sig in signals:
-                label = sig.name if not sig.unit else "{} [{}]".format(sig.name, sig.unit)
-                ax.plot(sig.timestamps, sig.samples, linewidth=0.9, label=label)
+            for (row, sig), (_f, _s) in zip(self.plotted, picked):
+                ax.plot(sig.timestamps, sig.samples, linewidth=0.9, label=row)
             ax.legend(fontsize=8)
             self.tidy_axes(ax)
             ax.set_xlabel("time [s]")
             self.axes = [ax]
 
-        self.plotted = signals
-        self.data_xrange = (float(min(s.timestamps[0] for s in signals)),
-                            float(max(s.timestamps[-1] for s in signals)))
+        sigs = [sig for _f, sig in picked]
+        self.data_xrange = (float(min(s.timestamps[0] for s in sigs)),
+                            float(max(s.timestamps[-1] for s in sigs)))
 
         self.fig.tight_layout()
         self.rebuild_cursors()   # re-add cursors on the fresh axes (draws too)
@@ -424,7 +486,7 @@ class ViewerApp:
         self.canvas.draw_idle()
 
     def update_readout(self):
-        """Interpolate every plotted signal at the cursor times."""
+        """Interpolate every plotted trace at the cursor times."""
         self.readout.delete(*self.readout.get_children())
         if not self.cursors:
             return
@@ -439,15 +501,14 @@ class ViewerApp:
                fmt(xs[1] - xs[0]) if len(xs) > 1 else ""]
         self.readout.insert("", "end", text="time [s]", values=row)
 
-        for sig in self.plotted:
+        for row_label, sig in self.plotted:
             t = np.asarray(sig.timestamps, dtype=np.float64)
             y = np.asarray(sig.samples, dtype=np.float64)
             vals = [float(np.interp(x, t, y)) for x in xs]
             row = [fmt(vals[0]),
                    fmt(vals[1]) if len(vals) > 1 else "",
                    fmt(vals[1] - vals[0]) if len(vals) > 1 else ""]
-            name = sig.name if not sig.unit else "{} [{}]".format(sig.name, sig.unit)
-            self.readout.insert("", "end", text=name, values=row)
+            self.readout.insert("", "end", text=row_label, values=row)
 
     # mouse handling: press near a cursor grabs it, motion drags, release drops.
     # While a toolbar tool (zoom/pan) is active, toolbar.mode is non-empty and
