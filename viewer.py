@@ -94,7 +94,7 @@ class ViewerApp:
                   command=self.open_file).pack(side="left")
 
         # accent-colored primary action, right where the eye starts
-        tk.Button(top, text="▶  Plot checked",
+        tk.Button(top, text="▶  Plot Selected Signals",
                   command=self.plot_selected,
                   bg=ACCENT, fg="white", activebackground=ACCENT_DARK,
                   activeforeground="white", relief="flat",
@@ -135,7 +135,7 @@ class ViewerApp:
         # glyph is the selection state now, not the highlight.
         self.tree = ttk.Treeview(left, columns=("unit", "samples"),
                                  show="tree headings", selectmode="none")
-        self.tree.heading("#0", text="Channel")
+        self.tree.heading("#0", text="Signals")
         self.tree.heading("unit", text="Unit")
         self.tree.heading("samples", text="Samples")
         self.tree.column("#0", width=160, stretch=True)
@@ -183,8 +183,8 @@ class ViewerApp:
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
 
-        self.show_placeholder("Open an MF4 file, tick some channels,\n"
-                              "then press 'Plot checked'")
+        self.show_placeholder("Open an MF4 file, tick some signals,\n"
+                              "then press 'Plot Selected Signals'")
 
         # a file dragged onto the exe arrives as a command-line argument
         if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
@@ -268,7 +268,8 @@ class ViewerApp:
         self.info_var.set("{}  —  MDF v{}, {} channels{}".format(
             os.path.basename(path), mdf.version, n_channels, duration))
         self.root.title("MF4 Viewer - " + os.path.basename(path))
-        self.show_placeholder("Tick some channels, then press 'Plot checked'")
+        self.show_placeholder("Tick some signals, then press "
+                              "'Plot Selected Signals'")
 
     # --- plotting ---------------------------------------------------------------
 
@@ -298,8 +299,8 @@ class ViewerApp:
         selected = [self.entries[i] for i in self.tree.get_children()
                     if i in self.checked]
         if not selected:
-            messagebox.showinfo("No channels",
-                                "Tick one or more channels in the list first.")
+            messagebox.showinfo("No signals",
+                                "Tick one or more signals in the list first.")
             return
 
         signals = []

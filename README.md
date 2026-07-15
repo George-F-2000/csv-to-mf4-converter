@@ -28,7 +28,7 @@ can also drag CSV files onto the exe icon — they arrive pre-loaded in the
 list.
 
 **Viewer:** double-click `dist\MF4Viewer.exe` (or drag an `.mf4` onto it),
-tick the channels you want in the list, and press *Plot checked*.
+tick the signals you want in the list, and press *Plot Selected Signals*.
 *Stacked axes* gives each channel its own subplot sharing the time axis
 (best for mixed units); unchecked, they overlay on one axis with a legend.
 The toolbar under the plot has zoom-rectangle, pan, back/forward, reset,
