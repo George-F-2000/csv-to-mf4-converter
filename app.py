@@ -33,12 +33,28 @@ from tkinter import filedialog, messagebox, scrolledtext
 from converter import convert
 
 
+def set_window_icon(root, icon_name):
+    """Give the window (and its taskbar button) the app's own icon.
+
+    PyInstaller unpacks files bundled with --add-data into a temp folder
+    exposed as sys._MEIPASS; running from source, the .ico sits in assets/
+    next to this file. The icon is cosmetic, so never let it stop the app.
+    """
+    base = getattr(sys, "_MEIPASS", os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "assets"))
+    try:
+        root.iconbitmap(os.path.join(base, icon_name))
+    except Exception:
+        pass
+
+
 class ConverterApp:
     def __init__(self, root):
         self.root = root
         root.title("CSV → MF4 Converter  (AVL Drive)")
         root.geometry("720x480")
         root.minsize(560, 380)
+        set_window_icon(root, "csvtomf4.ico")
 
         self.files = []                 # CSV paths queued for conversion
         self.log_queue = queue.Queue()  # worker thread -> GUI messages

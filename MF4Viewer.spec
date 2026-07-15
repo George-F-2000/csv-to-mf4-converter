@@ -5,7 +5,7 @@ a = Analysis(
     ['viewer.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('assets\\mf4viewer.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\mf4viewer.ico'],
 )
