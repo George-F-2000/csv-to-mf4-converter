@@ -1,0 +1,10 @@
+# Virtual environment - recreate with: python -m venv .venv && pip install -r requirements.txt
+.venv/
+
+# PyInstaller output - recreate with the build command in README.md
+build/
+dist/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
