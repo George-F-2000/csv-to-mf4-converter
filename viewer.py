@@ -44,6 +44,7 @@ matplotlib.use("TkAgg")   # select the tkinter drawing backend before pyplot-ish
 from matplotlib.backends.backend_tkagg import (FigureCanvasTkAgg,
                                                NavigationToolbar2Tk)
 from matplotlib.figure import Figure
+from matplotlib.transforms import blended_transform_factory
 
 from asammdf import MDF
 
@@ -160,8 +161,8 @@ class ViewerApp:
             self.readout_frame, columns=("c1", "c2", "delta"),
             show="tree headings", selectmode="none", height=8)
         self.readout.heading("#0", text="Signal")
-        self.readout.heading("c1", text="C1")
-        self.readout.heading("c2", text="C2")
+        self.readout.heading("c1", text="C1 (red)")
+        self.readout.heading("c2", text="C2 (green)")
         self.readout.heading("delta", text="Δ (C2−C1)")
         self.readout.column("#0", width=150, stretch=True)
         for col in ("c1", "c2", "delta"):
@@ -362,9 +363,9 @@ class ViewerApp:
     def rebuild_cursors(self):
         """(Re)create cursor lines on the current axes to match cursor_mode."""
         for cur in self.cursors:
-            for line in cur["lines"]:
+            for artist in cur["lines"] + [cur["label"]]:
                 try:
-                    line.remove()
+                    artist.remove()
                 except Exception:
                     pass
         self.cursors = []
@@ -383,7 +384,18 @@ class ViewerApp:
             self.last_cursor_x[i] = x
             lines = [ax.axvline(x, color=CURSOR_COLORS[i], linestyle="--",
                                 linewidth=1.1) for ax in self.axes]
-            self.cursors.append({"x": x, "lines": lines})
+            # colored "C1"/"C2" tag riding on top of the line. The blended
+            # transform pins x in data coordinates (so the tag follows the
+            # cursor) but y in axes coordinates (so it sits just above the
+            # top edge regardless of zoom).
+            top_ax = self.axes[0]
+            label = top_ax.text(
+                x, 1.02, "C{}".format(i + 1),
+                color=CURSOR_COLORS[i], fontsize=9, fontweight="bold",
+                ha="center", va="bottom",
+                transform=blended_transform_factory(
+                    top_ax.transData, top_ax.transAxes))
+            self.cursors.append({"x": x, "lines": lines, "label": label})
 
         # with one cursor, hide the C2 and delta columns
         self.readout.configure(
@@ -450,6 +462,7 @@ class ViewerApp:
         self.last_cursor_x[index] = x
         for line in cur["lines"]:
             line.set_xdata([x, x])
+        cur["label"].set_x(x)
         self.update_readout()
         self.canvas.draw_idle()
 
