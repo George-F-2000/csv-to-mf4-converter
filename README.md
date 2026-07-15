@@ -28,12 +28,12 @@ can also drag CSV files onto the exe icon — they arrive pre-loaded in the
 list.
 
 **Viewer:** double-click `dist\MF4Viewer.exe` (or drag an `.mf4` onto it),
-then select channels — Ctrl+click for several — and press *Plot selected*
-(double-click plots one directly). *Stacked axes* gives each channel its
-own subplot sharing the time axis (best for mixed units); unchecked
-overlays them with a legend. The toolbar under the plot has zoom-rectangle,
-pan, back/forward, reset, and save-as-PNG. If the viewer can open the file
-at all, its MDF structure is valid.
+tick the channels you want in the list, and press *Plot checked*.
+*Stacked axes* gives each channel its own subplot sharing the time axis
+(best for mixed units); unchecked, they overlay on one axis with a legend.
+The toolbar under the plot has zoom-rectangle, pan, back/forward, reset,
+and save-as-PNG. If the viewer can open the file at all, its MDF structure
+is valid.
 
 ## Developing: run without building
 
