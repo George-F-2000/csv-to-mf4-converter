@@ -96,6 +96,7 @@ class ViewerApp:
         self.files = []        # [{"path", "label", "mdf"}]
         self.entries = {}      # signal item id -> (file idx, name, group, index)
         self.checked = set()   # signal item ids whose checkbox is ticked
+        self.comments = {}     # signal item id -> channel comment (hover bar)
 
         # plot/cursor state
         self.axes = []                    # axes of the current plot
@@ -170,6 +171,19 @@ class ViewerApp:
         tree_scroll = ttk.Scrollbar(left, orient="vertical",
                                     command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
+
+        # comment bar: shows the hovered signal's description (the channel
+        # comment stored in the MF4). Packed to the bottom edge FIRST so it
+        # keeps its strip; the tree then expands into the rest.
+        self.comment_var = tk.StringVar(
+            value="hover a signal to see its description")
+        comment_bar = tk.Label(left, textvariable=self.comment_var,
+                               anchor="w", justify="left", wraplength=290,
+                               fg="#555555", font=("Segoe UI", 8))
+        comment_bar.pack(side="bottom", fill="x", pady=(3, 0))
+        comment_bar.bind("<Configure>", lambda e: comment_bar.config(
+            wraplength=max(e.width - 8, 100)))
+
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="left", fill="y")
 
@@ -177,6 +191,9 @@ class ViewerApp:
         # double-click on a FILE row sets that file's time offset
         self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Motion>", self.on_tree_motion)
+        self.tree.bind("<Leave>", lambda e: self.comment_var.set(
+            "hover a signal to see its description"))
 
         # right pane: plot on the left, cursor readout panel on the right
         right = tk.Frame(paned)
@@ -219,6 +236,17 @@ class ViewerApp:
                 self.add_file(arg)
 
     # --- checkbox handling ------------------------------------------------------
+
+    def on_tree_motion(self, event):
+        """Show the hovered signal's channel comment in the bar below."""
+        item = self.tree.identify_row(event.y)
+        if item in self.entries:
+            name = self.entries[item][1]
+            comment = self.comments.get(item, "")
+            self.comment_var.set("{}  —  {}".format(name, comment)
+                                 if comment else name + "  (no description)")
+        elif item:   # a file row
+            self.comment_var.set("")
 
     def on_tree_click(self, event):
         item = self.tree.identify_row(event.y)
@@ -302,9 +330,11 @@ class ViewerApp:
             for group, index in mdf.channels_db[name]:
                 if masters.get(group) == index:
                     continue   # skip time channels - time is always the x axis
-                unit, samples = "", ""
+                unit, samples, comment = "", "", ""
                 try:
-                    unit = getattr(mdf.groups[group].channels[index], "unit", "") or ""
+                    ch = mdf.groups[group].channels[index]
+                    unit = getattr(ch, "unit", "") or ""
+                    comment = getattr(ch, "comment", "") or ""
                     samples = mdf.groups[group].channel_group.cycles_nr
                 except Exception:
                     pass
@@ -312,6 +342,7 @@ class ViewerApp:
                     file_item, "end", text="{} {}".format(UNCHECKED, name),
                     values=(unit, samples))
                 self.entries[item] = (file_idx, name, group, index)
+                self.comments[item] = comment
                 n_signals += 1
 
         self.update_info()
@@ -326,6 +357,7 @@ class ViewerApp:
         self.files = []
         self.entries = {}
         self.checked = set()
+        self.comments = {}
         self.tree.delete(*self.tree.get_children())
         self.update_info()
         self.root.title("MF4 Viewer")
