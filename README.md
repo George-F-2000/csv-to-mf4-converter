@@ -38,6 +38,17 @@ becomes a node in the signal tree. In stacked mode, signals are grouped by
 name, so the same signal from every file lands on the same subplot with one
 color per file (legend in the top subplot). Cursor readout rows are
 prefixed with the file name. *Close all files* resets.
+
+*Time offset:* double-click a file's node to shift that run along the time
+axis (positive = later). The node shows the active shift, e.g.
+`run2.mf4 [+1.5 s]`, and plots, cursors and CSV export all use the shifted
+time. Use it to line up maneuvers that start at different times.
+
+*Export CSV:* writes the checked signals to one CSV for external plotting
+(Excel, MATLAB, matplotlib): a single `time [s]` column on a uniform grid
+(the finest sample step among the signals), one column per signal with the
+unit in the header, np.interp-resampled, offsets applied. Where a shorter
+run has no data the cell is blank, not extrapolated.
 The toolbar under the plot has zoom-rectangle, pan, back/forward, reset,
 and save-as-PNG. If the viewer can open the file at all, its MDF structure
 is valid.

@@ -28,10 +28,11 @@ Run from source:   .venv\\Scripts\\python.exe viewer.py [file.mf4 ...]
 ================================================================================
 """
 
+import csv
 import os
 import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import numpy as np
 
@@ -135,6 +136,8 @@ class ViewerApp:
                   command=lambda: self.set_all(True)).pack(side="left", padx=(10, 0))
         tk.Button(top, text="Uncheck all",
                   command=lambda: self.set_all(False)).pack(side="left", padx=(4, 0))
+        tk.Button(top, text="Export CSV…",
+                  command=self.export_csv).pack(side="left", padx=(10, 0))
         tk.Button(top, text="Close all files",
                   command=self.close_all).pack(side="left", padx=(4, 0))
 
@@ -170,8 +173,10 @@ class ViewerApp:
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="left", fill="y")
 
-        # one click on a signal row toggles its checkbox
+        # one click on a signal row toggles its checkbox;
+        # double-click on a FILE row sets that file's time offset
         self.tree.bind("<Button-1>", self.on_tree_click)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
 
         # right pane: plot on the left, cursor readout panel on the right
         right = tk.Frame(paned)
@@ -233,6 +238,29 @@ class ViewerApp:
         for item in self.entries:
             self.set_checked(item, state)
 
+    # --- per-file time offset ----------------------------------------------------
+
+    def on_tree_double_click(self, event):
+        item = self.tree.identify_row(event.y)
+        for f in self.files:
+            if f["item"] == item:
+                self.ask_offset(f)
+                return "break"   # don't let Treeview also toggle expansion
+
+    def ask_offset(self, f):
+        value = simpledialog.askfloat(
+            "Time offset",
+            "Shift '{}' along the time axis by how many seconds?\n"
+            "(positive = later, negative = earlier, 0 = none)".format(f["label"]),
+            initialvalue=f["offset"], parent=self.root)
+        if value is None:
+            return
+        f["offset"] = float(value)
+        suffix = "" if not f["offset"] else "  [{:+g} s]".format(f["offset"])
+        self.tree.item(f["item"], text=f["label"] + suffix)
+        if self.checked and self.plotted:
+            self.plot_selected()   # refresh the comparison with the new shift
+
     # --- file loading ----------------------------------------------------------
 
     def open_file(self):
@@ -262,11 +290,12 @@ class ViewerApp:
         if any(f["label"] == label for f in self.files):
             label = "{} ({})".format(label, len(self.files) + 1)
         file_idx = len(self.files)
-        self.files.append({"path": path, "label": label, "mdf": mdf})
 
         # file node, then that file's signals underneath
         file_item = self.tree.insert("", "end", text=label, open=True,
                                      values=("", ""), tags=("file",))
+        self.files.append({"path": path, "label": label, "mdf": mdf,
+                           "offset": 0.0, "item": file_item})
         masters = getattr(mdf, "masters_db", {})   # {group: master channel index}
         n_signals = 0
         for name in sorted(mdf.channels_db, key=str.lower):
@@ -337,8 +366,9 @@ class ViewerApp:
         ax.spines["right"].set_visible(False)
 
     def gather_checked(self):
-        """Checked signals in tree order -> [(file_idx, Signal)]. Reads the
-        data via mdf.get(); pops an error dialog and returns None on failure."""
+        """Checked signals in tree order -> [(file_idx, Signal)] with each
+        file's time offset already applied to the timestamps. Reads the data
+        via mdf.get(); pops an error dialog and returns None on failure."""
         picked = []
         for file_item in self.tree.get_children():
             for item in self.tree.get_children(file_item):
@@ -348,6 +378,8 @@ class ViewerApp:
                 try:
                     sig = self.files[file_idx]["mdf"].get(
                         name, group=group, index=index)
+                    if self.files[file_idx]["offset"]:
+                        sig.timestamps = sig.timestamps + self.files[file_idx]["offset"]
                 except Exception as exc:
                     messagebox.showerror(
                         "Read error", "Could not read '{}' from {}:\n{}".format(
@@ -431,6 +463,80 @@ class ViewerApp:
 
         self.fig.tight_layout()
         self.rebuild_cursors()   # re-add cursors on the fresh axes (draws too)
+
+    # --- CSV export ---------------------------------------------------------------
+
+    def export_csv(self):
+        """Write the checked signals to one CSV: a single time column on a
+        uniform grid (the finest median sample step among the signals), one
+        column per signal, resampled with np.interp. Cells outside a
+        signal's own time range are left blank rather than extrapolated, so
+        shorter runs don't produce fake flat tails in downstream plots.
+        File time offsets are applied (gather_checked does that)."""
+        if not self.files:
+            messagebox.showinfo("No file", "Open an MF4 file first.")
+            return
+        picked = self.gather_checked()
+        if picked is None:
+            return
+        if not picked:
+            messagebox.showinfo("No signals",
+                                "Tick one or more signals in the list first.")
+            return
+
+        out_path = filedialog.asksaveasfilename(
+            title="Export checked signals as CSV",
+            defaultextension=".csv",
+            initialfile="signals_export.csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if not out_path:
+            return
+
+        multi_file = len(self.files) > 1
+        columns = []   # (header, t, y)
+        for file_idx, sig in picked:
+            prefix = self.files[file_idx]["label"] + ": " if multi_file else ""
+            header = prefix + (sig.name if not sig.unit
+                               else "{} [{}]".format(sig.name, sig.unit))
+            columns.append((header,
+                            np.asarray(sig.timestamps, dtype=np.float64),
+                            np.asarray(sig.samples, dtype=np.float64)))
+
+        t_start = min(t[0] for _h, t, _y in columns)
+        t_end = max(t[-1] for _h, t, _y in columns)
+        dt = min(float(np.median(np.diff(t))) for _h, t, _y in columns)
+        n_rows = int(round((t_end - t_start) / dt)) + 1
+        if n_rows > 2_000_000:
+            messagebox.showerror(
+                "Too many rows",
+                "This export would be {:,} rows (span {:.6g} s at {:.3g} s "
+                "step). Zoom the selection down first.".format(
+                    n_rows, t_end - t_start, dt))
+            return
+        grid = t_start + np.arange(n_rows) * dt
+
+        try:
+            with open(out_path, "w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["time [s]"] + [h for h, _t, _y in columns])
+                resampled = []
+                for _h, t, y in columns:
+                    vals = np.interp(grid, t, y)
+                    inside = (grid >= t[0] - dt / 2) & (grid <= t[-1] + dt / 2)
+                    resampled.append((vals, inside))
+                for k in range(n_rows):
+                    row = ["{:.9g}".format(grid[k])]
+                    row += ["{:.9g}".format(vals[k]) if inside[k] else ""
+                            for vals, inside in resampled]
+                    writer.writerow(row)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+
+        messagebox.showinfo(
+            "Export complete",
+            "{} signal(s), {:,} rows ({:.6g} s at {:.3g} s step)\n\n{}".format(
+                len(columns), n_rows, t_end - t_start, dt, out_path))
 
     # --- measurement cursors ------------------------------------------------------
 
